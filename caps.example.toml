@@ -1,0 +1,18 @@
+# Watchdog configuration. Copy to caps.toml and edit.
+# Key names must match the API key names in Console ("person-project", e.g. camille-rare-cancer).
+
+period = "total"            # "total" = since `start`; "monthly" = calendar month (UTC)
+start = "2026-10-01"        # start of the award tranche
+price_multiplier = 0.5      # Broad pays 50% of list price
+alert_at = [0.5, 0.8]       # Slack alert at 50% and 80% of a cap (once each per period)
+disable_at = 0.85           # set the key(s) to inactive at 85% (only with --enforce)
+# workspace_id = "wrkspc_..."   # limit to one workspace (recommended: Production)
+# default_key_cap = 50          # cap for keys not listed below; omit to ignore them
+state_file = "watchdog_state.json"
+
+[keys]                      # cap per API key, in USD at your price
+"camille-rare-cancer" = 200
+"kit-evolution" = 200
+
+[people]                    # cap per person = sum of all keys named "<person>-..."
+camille = 400
