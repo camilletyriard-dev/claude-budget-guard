@@ -18,16 +18,16 @@ Admin API docs: https://platform.claude.com/docs/en/manage-claude/usage-cost-api
 from __future__ import annotations
 
 import json
-import os
 import sys
 import tomllib
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .notify import level, money, overview, slack
 from .pricing import PRICES, Counts, UnknownModel, cost_usd
 
 API = "https://api.anthropic.com/v1/organizations"
@@ -45,6 +45,7 @@ class Config:
     alert_at: list[float] = field(default_factory=lambda: [0.5, 0.8])
     disable_at: float = 0.85
     workspace_id: str | None = None
+    total_budget: float | None = None  # shown in the daily overview, e.g. 25000
     state_file: str = "watchdog_state.json"
 
     @classmethod
@@ -93,7 +94,7 @@ class AdminAPI:
         base += [("workspace_ids[]", workspace_id)] if workspace_id else []
         while True:
             page = self.request("GET", "/usage_report/messages", base + ([("page", page_token)] if page_token else []))
-            rows += [r for bucket in page["data"] for r in bucket["results"]]
+            rows += [dict(r, day=b["starting_at"][:10]) for b in page["data"] for r in b["results"]]
             if not page.get("has_more"):
                 return rows
             page_token = page["next_page"]
@@ -146,17 +147,24 @@ def build_targets(cfg: Config, keys: list[dict], spend_by_id: dict[str, float]) 
     return targets
 
 
-def slack(text: str) -> None:
-    url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not url:
-        return
-    req = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
-                                 headers={"content-type": "application/json"})
-    urllib.request.urlopen(req, timeout=30).close()
+def daily_overview(cfg: Config, names: dict[str, str], spend: dict[str, float], yday: dict[str, float],
+                   since: str) -> str:
+    """One Slack message: total, yesterday, spend per person and per key (with caps where set)."""
+    label = lambda i: names.get(i, "playground / other workspace")  # noqa: E731
+    people: dict[str, float] = defaultdict(float)
+    for key_id, usd in spend.items():
+        people[person_of(label(key_id))] += usd
+    caps = {p.lower(): c for p, c in cfg.people.items()}
+    title = (f":bar_chart: *Claude API spend since {since}*\nTotal {money(sum(spend.values()), cfg.total_budget)}"
+             f" · yesterday ${sum(yday.values()):,.2f}")
+    return overview(title, {
+        "By person": [(p, usd, caps.get(p)) for p, usd in people.items() if usd > 0],
+        "By key": [(label(i), usd, cfg.keys.get(label(i), cfg.default_key_cap)) for i, usd in spend.items() if usd > 0],
+    })
 
 
 def run(cfg: Config, api: AdminAPI, enforce: bool = False, now: datetime | None = None,
-        notify=slack, out=sys.stdout) -> list[Target]:
+        notify=slack, out=sys.stdout, summary: bool = False) -> list[Target]:
     now = now or datetime.now(timezone.utc)
     start = cfg.period_start(now)
     keys = api.list_keys(cfg.workspace_id)
@@ -164,8 +172,13 @@ def run(cfg: Config, api: AdminAPI, enforce: bool = False, now: datetime | None 
     status = {k["id"]: k["status"] for k in keys}
 
     spend: dict[str, float] = defaultdict(float)
+    yday: dict[str, float] = defaultdict(float)
+    yesterday = (now - timedelta(days=1)).date().isoformat()
     for row in api.usage_rows(start, cfg.workspace_id):
-        spend[row.get("api_key_id") or "console/playground"] += row_cost(row, cfg.price_multiplier)
+        key_id, usd = row.get("api_key_id") or "playground", row_cost(row, cfg.price_multiplier)
+        spend[key_id] += usd
+        if row.get("day") == yesterday:
+            yday[key_id] += usd
     targets = build_targets(cfg, keys, spend)
 
     state_path = Path(cfg.state_file)
@@ -184,15 +197,17 @@ def run(cfg: Config, api: AdminAPI, enforce: bool = False, now: datetime | None 
             print(f"  -> {'disabled' if enforce else 'would disable'} {names[key_id]}", file=out)
         # one message per level per period; a disable is always reported
         tag = f"{period_tag}|{t.label}"
-        level = cfg.disable_at if over else max([a for a in cfg.alert_at if t.frac >= a], default=0)
-        if level > state.get(tag, 0) or (active and enforce):
+        reached = cfg.disable_at if over else level(t.frac, cfg.alert_at)
+        if reached > state.get(tag, 0) or (active and enforce):
             action = (f" Disabled: {', '.join(names[i] for i in active)}." if active and enforce else
                       f" Would disable: {', '.join(names[i] for i in active)} (dry run)." if active else "")
             notify(f"{':no_entry:' if over else ':warning:'} Claude budget: {t.label} at {t.frac:.0%} "
                    f"(${t.spent:.2f} of ${t.cap:.2f}).{action}")
-            state[tag] = max(level, state.get(tag, 0))
+            state[tag] = max(reached, state.get(tag, 0))
     unpriced = sum(v for k, v in spend.items() if k not in names)
     if unpriced:
         print(f"  (${unpriced:.2f} on keys outside this workspace or the Console playground)", file=out)
     state_path.write_text(json.dumps(state, indent=1))
+    if summary:
+        notify(daily_overview(cfg, names, spend, yday, period_tag))
     return targets

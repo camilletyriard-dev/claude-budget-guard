@@ -14,7 +14,7 @@ So per-key and per-person caps have to be built by us: that is this repo.
 
 | Phase | When | What | Who | Done when |
 |---|---|---|---|---|
-| 0. Prerequisites | Now | Admin API key from the Broad admins; Slack incoming webhook for the lab channel; decide where the repo lives (lab org recommended) | Camille asks, Broad admins / Ignacio approve | Key and webhook stored as repo secrets |
+| 0. Prerequisites | Now | Slack incoming webhook for the lab channel; ask a Console org admin (Ignacio, if he has the admin role) to create an Admin key and paste it into the repo secret himself | Camille asks, Ignacio | Key and webhook stored as repo secrets |
 | 1. Wrapper pilot | Week 1 | Each person installs the package, runs `examples/quickstart.py` on a Dev key, compares printed cost with Console > Usage | Everyone | Costs match Console up to rounding for at least one call per person |
 | 2. Watchdog dry run | Week 1-2 | Run on GitHub Actions without `--enforce`; compare per-key totals with Console > Usage once a day | Camille | One week of totals within ~2% of Console; no false alerts |
 | 3. Enforce | Week 2 | Set `WATCHDOG_ENFORCE=true`, Production workspace first | Camille, with Ignacio's OK on the caps | One deliberate test: a $1-cap test key gets disabled |
@@ -31,13 +31,17 @@ So per-key and per-person caps have to be built by us: that is this repo.
 | Option | What it adds | Effort | Recommendation |
 |---|---|---|---|
 | **Console** | Creating/naming keys, workspace caps, re-enabling a disabled key, Usage pages to check numbers | None | **Use for structure and manual actions.** It cannot hold per-key caps. |
-| **Slack alerts** (webhook) | Messages at 50% / 80% / disable | Done (`SLACK_WEBHOOK_URL`) | **Use.** Cheapest way for everyone to see spend. |
+| **Slack alerts + daily overview** (webhook) | Messages at 50% / 80% / disable, plus one overview each morning | Done (`SLACK_WEBHOOK_URL`) | **Use.** Cheapest way for everyone to see spend. |
 | **Slack commands** (e.g. `/budget status`, `/budget raise kit 50`) | Manage caps from Slack | 2-4 days + a hosted Slack app, and someone has to own its security | **Not now.** Editing `caps.toml` in a pull request gives the same control with review and history. |
 | **GitHub as the control panel** | Caps changed by pull request; Ignacio approves; Actions runs the watchdog | Done | **Use.** Auditable, no server. |
 | **Proxy / gateway** (e.g. LiteLLM with virtual keys) | Hard per-key limits *before* each call, for any tool incl. Claude Code | 1-3 days + hosting + everyone pointing `ANTHROPIC_BASE_URL` at it | **Only if** the watchdog's lag proves too loose (e.g. large Claude Code usage on API keys). |
 | **Dashboard** | One page with spend per person / key over time | ~1 day | Optional later; the watchdog output already has the numbers. |
 
 **Recommended setup:** Console (workspaces + hard workspace caps) + watchdog on GitHub Actions with Slack alerts + wrapper in everyone's code. Revisit a proxy only after a month of data.
+
+## If there is no Admin key
+
+Fall back to the wrapper with Slack alerts, `claude-budget report --slack` from a cron on the cluster, and a Console workspace limit as the hard backstop. See "Without an Admin key" in the README for what this does not cover.
 
 ## Risks
 

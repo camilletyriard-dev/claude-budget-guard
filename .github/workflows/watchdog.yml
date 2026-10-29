@@ -1,7 +1,10 @@
-# Runs the watchdog every 15 minutes on GitHub's servers: no lab server needed.
+# Runs the watchdog every 15 minutes on GitHub's servers: no lab server needed,
+# and posts the daily spend overview to Slack at 12:41 UTC (8:41 Boston summer time, 7:41 winter time).
 # Setup (repo admin): Settings > Secrets and variables > Actions
-#   secret   ANTHROPIC_ADMIN_KEY   Admin API key from the Broad admins (sk-ant-admin01-...)
-#   secret   SLACK_WEBHOOK_URL     incoming webhook for the lab channel (optional)
+#   secret   ANTHROPIC_ADMIN_KEY   Admin API key (sk-ant-admin01-...); the org admin can paste it here
+#                                  directly, so nobody else ever sees it
+#   secret   SLACK_WEBHOOK_URL     incoming webhook for the lab channel
+#   variable WATCHDOG_ENABLED      "true" to turn the schedule on
 #   variable WATCHDOG_ENFORCE      "true" to actually disable keys; anything else = dry run
 # GitHub may delay scheduled runs by several minutes; treat this as a backstop, not a hard limit.
 name: watchdog
@@ -9,7 +12,13 @@ name: watchdog
 on:
   schedule:
     - cron: "7,22,37,52 * * * *"
+    - cron: "41 12 * * *"
   workflow_dispatch:
+    inputs:
+      summary:
+        description: "Also post the spend overview to Slack"
+        type: boolean
+        default: true
 
 concurrency: watchdog
 
@@ -29,7 +38,10 @@ jobs:
           key: watchdog-state-${{ github.run_id }}
           restore-keys: watchdog-state-
       - run: pip install --no-deps .
-      - run: claude-budget watchdog --caps caps.toml ${{ vars.WATCHDOG_ENFORCE == 'true' && '--enforce' || '' }}
+      - run: >-
+          claude-budget watchdog --caps caps.toml
+          ${{ vars.WATCHDOG_ENFORCE == 'true' && '--enforce' || '' }}
+          ${{ (github.event.schedule == '41 12 * * *' || inputs.summary) && '--summary' || '' }}
         env:
           ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

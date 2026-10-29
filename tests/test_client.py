@@ -21,12 +21,14 @@ class ClientTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.ledger = Ledger(Path(self.tmp.name) / "l.db")
         self.fake = FakeClient(input_tokens=1000, usage=dict(input_tokens=1000, output_tokens=200))
+        self.posts = []
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def make(self, **kw):
         kw.setdefault("budget_usd", 1.0)
+        kw.setdefault("notify", self.posts.append)
         return BudgetedAnthropic("p", ledger=self.ledger, client=self.fake, multiplier=1.0, verbose=False, **kw)
 
     # ---- estimates -------------------------------------------------------------
@@ -134,6 +136,42 @@ class ClientTest(unittest.TestCase):
         a, b = self.make(), self.make(budget_usd=None)  # b keeps a's budget
         a.messages.create(model=SONNET, max_tokens=500, messages=MSG)
         self.assertAlmostEqual(b.remaining(), a.remaining())
+
+    # ---- Slack alerts without an Admin key ---------------------------------------
+    def test_slack_alert_once_per_level(self):
+        c = self.make(budget_usd=0.01)  # each call: actual $0.004, worst case $0.007
+        c.messages.create(model=SONNET, max_tokens=0, messages=MSG)    # 40%: nothing
+        self.assertEqual(self.posts, [])
+        c.messages.create(model=SONNET, max_tokens=0, messages=MSG)    # 80%: one alert
+        self.assertEqual(self.posts, [":warning: Claude budget: project *p* passed 80% of its budget "
+                                      "($0.01 of $0.01 (80%))."])
+        for _ in range(2):                                              # blocked twice, posted once
+            with self.assertRaises(BudgetExceeded):
+                c.messages.create(model=SONNET, max_tokens=500, messages=MSG)
+        self.assertEqual(len(self.posts), 2)
+        self.assertIn("blocked a call", self.posts[1])
+
+    def test_new_budget_rearms_alerts(self):
+        c = self.make(budget_usd=0.008)
+        c.messages.create(model=SONNET, max_tokens=0, messages=MSG)    # 50%
+        c.messages.create(model=SONNET, max_tokens=0, messages=MSG)    # 100%
+        self.assertEqual(len(self.posts), 2)
+        self.ledger.set_budget("p", 0.016)                              # raised: back to 50%
+        c.messages.create(model=SONNET, max_tokens=0, messages=MSG)    # 75%: no new level
+        self.assertEqual(len(self.posts), 3)                            # 50% alert again for the new budget
+        self.assertIn("passed 50%", self.posts[2])
+
+    def test_run_budget_block_is_not_posted(self):
+        c = self.make()
+        with c.run_budget(0.001):
+            with self.assertRaises(BudgetExceeded):
+                c.messages.create(model=SONNET, max_tokens=500, messages=MSG)
+        self.assertEqual(self.posts, [])
+
+    def test_no_budget_no_alerts(self):
+        BudgetedAnthropic("q", ledger=self.ledger, client=self.fake, multiplier=1.0, verbose=False,
+                          notify=self.posts.append).messages.create(model=SONNET, max_tokens=0, messages=MSG)
+        self.assertEqual(self.posts, [])
 
     # ---- usage parsing ------------------------------------------------------------
     def test_usage_parsing(self):

@@ -39,6 +39,20 @@ class CliTest(unittest.TestCase):
         _, out = self.cli("status")
         self.assertRegex(out, r"rare-cancer\s+-\s+\$12\.5000\s+-")
 
+    def test_report(self):
+        self.cli("set", "rare-cancer", "200")
+        self.cli("add", "rare-cancer", "50")
+        with mock.patch("claude_budget.notify.slack", return_value=True) as post:
+            code, out = self.cli("report", "--slack")
+        self.assertEqual(code, 0)
+        self.assertIn("last 24 h $50.00", out)
+        self.assertIn("*rare-cancer* $50.00 of $200.00 (25%)", out)
+        self.assertIn("rare-cancer", post.call_args[0][0])
+        os.environ.pop("SLACK_WEBHOOK_URL", None)
+        code, out = self.cli("report", "--slack")
+        self.assertEqual(code, 1)
+        self.assertIn("SLACK_WEBHOOK_URL", out)
+
     def test_watchdog_needs_admin_key(self):
         code, out = self.cli("watchdog", "--caps", "missing.toml")
         self.assertEqual(code, 2)

@@ -18,7 +18,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .ledger import BudgetExceeded, Ledger  # noqa: F401  (re-exported)
+from .ledger import BudgetExceeded, Ledger
+from .notify import level, money, slack
 from .pricing import Counts, cost_usd, default_multiplier
 
 PREFIX = "[claude-budget]"
@@ -95,17 +96,22 @@ class BudgetedAnthropic:
     project:            ledger key, e.g. "rare-cancer"
     budget_usd:         cap for the project on this machine (None: keep what the ledger has)
     confirm_above_usd:  ask before calls whose worst case is >= this (0: always, None: never)
+    alert_at:           post to Slack (SLACK_WEBHOOK_URL) once when spend passes these fractions of
+                        the budget, and once when a call is blocked; needs no Admin key
     multiplier:         your price / list price (default env CLAUDE_BUDGET_PRICE_MULTIPLIER, else 1.0)
     """
 
     def __init__(self, project: str, budget_usd: float | None = None, *, confirm_above_usd: float | None = None,
                  multiplier: float | None = None, ledger: Ledger | None = None, client: Any = None,
-                 confirm: Callable[[str], bool] = _ask, verbose: bool = True, **client_kwargs: Any):
+                 confirm: Callable[[str], bool] = _ask, verbose: bool = True,
+                 alert_at: tuple[float, ...] = (0.5, 0.8), notify: Callable[[str], Any] = slack,
+                 **client_kwargs: Any):
         if client is None:
             import anthropic  # imported lazily so tests and the watchdog don't need the SDK
             client = anthropic.Anthropic(**client_kwargs)
         self._client, self.project, self.verbose = client, project, verbose
         self.confirm_above_usd, self._confirm = confirm_above_usd, confirm
+        self.alert_at, self._notify = list(alert_at), notify
         self.multiplier = default_multiplier() if multiplier is None else multiplier
         self.ledger = ledger or Ledger()
         if budget_usd is not None:
@@ -128,6 +134,19 @@ class BudgetedAnthropic:
         budget, spent = self.ledger.budget(self.project), self.ledger.spent(self.project)
         return {"project": self.project, "budget_usd": budget, "spent_usd": spent,
                 "remaining_usd": None if budget is None else budget - spent}
+
+    def _alert(self, blocked: bool = False) -> None:
+        """Slack alert, once per level per budget (shared by all processes using this ledger)."""
+        budget = self.ledger.budget(self.project)
+        if not budget:
+            return
+        spent = self.ledger.spent(self.project)
+        reached = 1.0 if blocked else level(spent / budget, self.alert_at)
+        if reached and self.ledger.first_alert(self.project, reached, budget):
+            what = "blocked a call: budget used up" if blocked else f"passed {reached:.0%} of its budget"
+            # money() shows the actual percentage, which can be above the level just passed
+            self._notify(f"{':no_entry:' if blocked else ':warning:'} Claude budget: project *{self.project}* "
+                         f"{what} ({money(spent, budget)}).")
 
     # ---- estimate -------------------------------------------------------------
     def estimate(self, **kwargs: Any) -> Estimate:
@@ -169,7 +188,12 @@ class BudgetedAnthropic:
             if not self._confirm(msg + ". Continue? [y/N]"):
                 raise CallCancelled("Call cancelled at the confirmation prompt.")
         run_id, run_limit = _run.get() or (None, None)
-        entry = self.ledger.reserve(self.project, est.high_usd, est.model, run_id, run_limit)
+        try:
+            entry = self.ledger.reserve(self.project, est.high_usd, est.model, run_id, run_limit)
+        except BudgetExceeded as e:
+            if e.scope == "project":  # a run budget only stops one loop: no Slack message
+                self._alert(blocked=True)
+            raise
         try:
             response = self._client.messages.create(**kwargs)
         except BaseException as e:
@@ -178,6 +202,7 @@ class BudgetedAnthropic:
         c = counts_from_usage(response.usage, kwargs)
         cost = cost_usd(est.model, c, self.multiplier)
         self.ledger.settle(entry, cost, _get(response, "id", None))
+        self._alert()
         left = self.remaining()
         self._log(f"actual ${cost:.4f} (in {c.input:,} / out {c.output:,} / cache read {c.cache_read:,} / "
                   f"cache write {c.cache_write_5m + c.cache_write_1h:,}) | spent ${self.ledger.spent(self.project):.4f}"

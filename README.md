@@ -11,9 +11,10 @@ Console spend limits apply to a whole organization or workspace, not to a single
 | How | Refuses a call *before* it is sent if the worst case does not fit | Reads usage per key with the Admin API and sets the key to `inactive` |
 | Speed | Immediate | Every ~15 min, plus a few minutes of usage-data lag |
 | Covers | Only `messages.create` calls made through the wrapper | Everything on the key: SDK, notebooks, Batch, Claude Code |
-| Needs | Nothing extra | An Admin API key (from the org admins) |
+| Slack | Alert at 50% / 80% of a project budget, and when a call is blocked | Alerts at 50% / 80%, when a key is disabled, and a **daily overview** |
+| Needs | Nothing extra (set `SLACK_WEBHOOK_URL` for Slack) | An Admin API key (from an org admin) |
 
-Use both: the wrapper is a fast, soft brake inside your code; the watchdog is the slower, hard stop on the key.
+Use both: the wrapper is a fast, soft brake inside your code; the watchdog is the slower, hard stop on the key. **No Admin key yet?** The wrapper alone already gives you budgets and Slack alerts, see [Without an Admin key](#without-an-admin-key).
 
 ---
 
@@ -75,6 +76,21 @@ client.verbose = False   # silence the printed lines
 
 In a job without a keyboard (cluster, cron), an unanswered confirmation counts as **no**, so leave `confirm_above_usd` off there.
 
+### Slack alerts from your code
+
+```bash
+export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...   # the lab channel's webhook
+```
+
+Then the wrapper posts once when a project passes 50% and 80% of its budget, and once when it blocks a call:
+
+```
+:warning: Claude budget: project *rare-cancer* passed 80% of its budget ($161.20 of $200.00 (81%)).
+:no_entry: Claude budget: project *rare-cancer* blocked a call: budget used up ($199.10 of $200.00 (100%)).
+```
+
+Each alert is sent once per budget, even with many parallel processes; raising the budget re-arms them. Change the levels with `BudgetedAnthropic(..., alert_at=(0.5, 0.8, 0.95))`. A Slack error never stops your call.
+
 ### Command line
 
 ```bash
@@ -82,6 +98,7 @@ claude-budget status                    # budget / spent / remaining per project
 claude-budget set rare-cancer 200       # set or change a budget ("none" removes it)
 claude-budget history rare-cancer       # last calls
 claude-budget add rare-cancer 12.50 --note "batch job"   # record spend made outside the wrapper
+claude-budget report --slack            # post this machine's overview to Slack
 ```
 
 (`python -m claude_budget ...` works too.)
@@ -139,11 +156,34 @@ Spend since 2026-10-01 (DRY RUN):
 - **GitHub Actions** (no server needed): `.github/workflows/watchdog.yml`. Add the secrets `ANTHROPIC_ADMIN_KEY` and `SLACK_WEBHOOK_URL`, the variable `WATCHDOG_ENABLED=true`, commit `caps.toml`, and set `WATCHDOG_ENFORCE=true` once the dry run looks right. Scheduled runs can be delayed by GitHub.
 - or **cron** on a lab machine: `*/15 * * * * cd /path && claude-budget watchdog --caps caps.toml --enforce`
 
+**Daily overview in Slack**: every morning (12:41 UTC) the workflow posts one message with the spend per person and per key. Set `total_budget = 25000` in `caps.toml` to also see the share of the tranche used. Run it by hand from the Actions tab ("Run workflow").
+
+```
+:bar_chart: Claude API spend since 2026-10-01
+Total $237.00 of $25,000.00 (1%) · yesterday $137.00
+By person: *kit* $180.00 · *camille* $50.00 of $400.00 (12%)
+By key: *kit-evolution* $180.00 of $400.00 (45%) · *camille-rare-cancer* $30.00 of $200.00 (15%) · *camille-scratch* $20.00
+```
+
 **What happens at the cap**: the key is set to `inactive` and Slack gets a message. To restore it, raise the cap in `caps.toml` *first*, then re-activate the key in Console. A key re-activated without a higher cap is switched off again on the next run.
 
 **Limits of the watchdog**: usage data usually appears within ~5 minutes but can take longer, and it runs every 15 minutes, so a fast loop can overshoot a cap before the key is disabled. That is why `disable_at` is 85%, not 100%. Usage rows are daily aggregates, so the Haiku 5.5 long-prompt surcharge (5x above 100k prompt tokens per request) is not applied; models missing from the price table are priced at the most expensive model.
 
 ---
+
+## Without an Admin key
+
+The Admin key is the only way to see spend **per API key** across everyone. If the org admins won't create one, this still works without it:
+
+1. **Wrapper + Slack** (above): budgets per project, alerts at 50% / 80% and on a block. Only covers code that uses the wrapper.
+2. **Daily overview from a machine**: on the cluster (or wherever the jobs run), add a cron line:
+   `41 8 * * * claude-budget report --slack`
+   It posts that machine's projects, budgets and last-24-hour spend. Each machine reports its own ledger.
+3. **Hard caps in Console**: a workspace per person or project with a Console spend limit. Enforced by Anthropic for every call, no code at all, but no Slack.
+
+What you lose without the Admin key: calls that bypass the wrapper (raw SDK, notebooks, Claude Code) are not counted, and no key is ever disabled automatically.
+
+**About the Admin key itself**: only someone with the *admin* role in the Console organization can create one (Console > Settings > Admin keys). The secret is shown once, at creation, so an existing key cannot be looked up later. Console Admin keys have no scopes: every key has full admin access to the organization. The safest setup is for the admin to paste the new key straight into this repo's GitHub secret (`ANTHROPIC_ADMIN_KEY`). Then nobody else ever sees it, and the watchdog code only reads usage, lists keys and sets a key to `inactive`.
 
 ## Keeping prices right
 
@@ -157,7 +197,7 @@ All prices live in one table, `src/claude_budget/pricing.py`, used by both the w
 python -m unittest discover -s tests -t . -v     # no dependencies needed
 ```
 
-43 tests, against a fake Anthropic client and a fake Admin API (no network, no cost): price table and modifiers (cache, Batch, US data residency, fast mode, Haiku 5.5 tier, web search), budget refusal before sending, confirmation prompt, run budgets, API errors releasing reservations, 8 processes racing for one budget without overshooting, watchdog pagination, alerts sent once per level, person caps, dry run vs enforce, and wrapper/watchdog price agreement.
+54 tests, against a fake Anthropic client and a fake Admin API (no network, no cost): price table and modifiers (cache, Batch, US data residency, fast mode, Haiku 5.5 tier, web search), budget refusal before sending, confirmation prompt, run budgets, API errors releasing reservations, 8 processes racing for one budget without overshooting, watchdog pagination, alerts sent once per level (wrapper and watchdog), Slack failures never breaking a call, the daily overview, person caps, dry run vs enforce, and wrapper/watchdog price agreement.
 
 **Not yet tested against the real API.** The usage-report and key-update requests follow the documented formats (links below); run the dry run once before enabling `--enforce`.
 
@@ -167,6 +207,7 @@ python -m unittest discover -s tests -t . -v     # no dependencies needed
 - Usage and Cost API: <https://platform.claude.com/docs/en/manage-claude/usage-cost-api>
 - Update API key: <https://platform.claude.com/docs/en/api/http/admin/api_keys/update>
 - Token counting: <https://platform.claude.com/docs/en/build-with-claude/token-counting>
+- Admin API keys: <https://platform.claude.com/docs/en/manage-claude/admin-api-keys>
 - Spend limits API (workspace/organization only, early access): <https://platform.claude.com/docs/en/api/http/beta/organization/spend_limits/set>
 
 See `PLAN.md` for the rollout plan.

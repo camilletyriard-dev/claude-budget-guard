@@ -28,14 +28,14 @@ class WatchdogTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def go(self, rows, enforce=False, **cfg):
+    def go(self, rows, enforce=False, summary=False, **cfg):
         cfg = Config(price_multiplier=0.5, start="2026-10-01", state_file=self.state, **cfg)
         self.admin = getattr(self, "admin", None) or FakeAdmin(KEYS, rows)
         self.admin.rows = rows
         api = AdminAPI("sk-ant-admin01-test")
         api.request = self.admin.request
         out = io.StringIO()
-        targets = run(cfg, api, enforce=enforce, now=NOW, notify=self.messages.append, out=out)
+        targets = run(cfg, api, enforce=enforce, now=NOW, notify=self.messages.append, out=out, summary=summary)
         return {t.label: t for t in targets}, out.getvalue()
 
     def test_spend_per_key_and_pagination(self):
@@ -89,6 +89,22 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(len(t), 3)
         self.assertAlmostEqual(t["key camille-scratch"].spent, 5)
         self.assertIn("Console playground", out)
+
+    def test_daily_overview(self):
+        rows = [opus_usd(30)("k1"), opus_usd(20)("k2"), opus_usd(80)("k3"),
+                dict(opus_usd(100)("k3"), day="2026-10-20"), opus_usd(7)(None)]
+        self.go(rows, summary=True, total_budget=1000, people={"camille": 400},
+                keys={"kit-evolution": 400})
+        self.assertEqual(len(self.messages), 1)  # nothing near a cap: only the overview
+        text = self.messages[0]
+        self.assertIn("since 2026-10-01", text)
+        self.assertIn("Total $237.00 of $1,000.00 (24%) · yesterday $137.00", text)
+        self.assertIn("By person: *kit* $180.00 · *camille* $50.00 of $400.00 (12%) · *playground", text)
+        self.assertIn("*kit-evolution* $180.00 of $400.00 (45%) · *camille-rare-cancer* $30.00", text)
+
+    def test_no_overview_unless_asked(self):
+        self.go([opus_usd(30)("k1")], keys={"camille-rare-cancer": 1000})
+        self.assertEqual(self.messages, [])
 
     def test_row_cost_rules(self):
         self.assertAlmostEqual(row_cost(usage_row("k", "claude-opus-5-5", output=1_000_000, tier="batch"), 1.0), 10)

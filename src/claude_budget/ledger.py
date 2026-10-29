@@ -19,6 +19,10 @@ STALE_RESERVATION_S = 3600  # reservations from crashed processes stop counting 
 class BudgetExceeded(RuntimeError):
     """Raised before a call is sent when its worst-case cost would exceed a budget."""
 
+    def __init__(self, message: str, scope: str = "project"):
+        super().__init__(message)
+        self.scope = scope  # "project" or "run"
+
 
 def default_path() -> Path:
     return Path(os.environ.get("CLAUDE_BUDGET_DB", Path.home() / ".claude_budget" / "ledger.db"))
@@ -36,6 +40,8 @@ class Ledger:
                     id INTEGER PRIMARY KEY, ts REAL, project TEXT, run TEXT, model TEXT,
                     status TEXT, reserved_usd REAL DEFAULT 0, cost_usd REAL DEFAULT 0, note TEXT);
                 CREATE INDEX IF NOT EXISTS entries_project ON entries(project, status);
+                CREATE TABLE IF NOT EXISTS alerts(project TEXT, level REAL, budget_usd REAL,
+                                                  PRIMARY KEY(project, level, budget_usd));
             """)
         conn.close()
 
@@ -97,7 +103,7 @@ class Ledger:
                 left = run_limit - self._committed(c, "run=?", run)
                 if usd > left + 1e-12:
                     raise BudgetExceeded(f"Run budget: worst case ${usd:.4f} > remaining ${left:.4f} "
-                                         f"of ${run_limit:.2f}. Call not sent.")
+                                         f"of ${run_limit:.2f}. Call not sent.", scope="run")
             return c.execute("INSERT INTO entries(ts, project, run, model, status, reserved_usd) "
                              "VALUES(?,?,?,?, 'reserved', ?)", (time.time(), project, run, model, usd)).lastrowid
 
@@ -114,6 +120,16 @@ class Ledger:
         with self._tx() as c:
             c.execute("INSERT INTO entries(ts, project, status, cost_usd, note) VALUES(?,?, 'manual', ?, ?)",
                       (time.time(), project, usd, note))
+
+    def first_alert(self, project: str, level: float, budget: float) -> bool:
+        """True exactly once per (project, level, budget), across processes. A new budget re-arms alerts."""
+        with self._tx() as c:
+            return c.execute("INSERT OR IGNORE INTO alerts VALUES(?,?,?)", (project, level, budget)).rowcount == 1
+
+    def spent_since(self, project: str, since_ts: float) -> float:
+        with self._tx() as c:
+            return c.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM entries WHERE project=? AND ts>=? "
+                             "AND status IN ('settled','manual')", (project, since_ts)).fetchone()[0]
 
     def summary(self) -> list[tuple[str, float | None, float]]:
         """(project, budget, spent) for every known project."""

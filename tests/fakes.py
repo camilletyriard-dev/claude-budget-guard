@@ -32,12 +32,19 @@ class FakeClient:
 
 
 def usage_row(key_id, model="claude-sonnet-5-5", uncached=0, output=0, cache_read=0, w5=0, w1=0,
-              searches=0, tier="standard", geo="global", speed="standard"):
-    return {"api_key_id": key_id, "model": model, "uncached_input_tokens": uncached, "output_tokens": output,
+              searches=0, tier="standard", geo="global", speed="standard", day="2026-10-28"):
+    return {"day": day, "api_key_id": key_id, "model": model, "uncached_input_tokens": uncached, "output_tokens": output,
             "cache_read_input_tokens": cache_read,
             "cache_creation": {"ephemeral_5m_input_tokens": w5, "ephemeral_1h_input_tokens": w1},
             "server_tool_use": {"web_search_requests": searches}, "service_tier": tier,
             "inference_geo": geo, "speed": speed}
+
+
+def buckets(rows):
+    """Group rows into daily buckets the way the usage report returns them (no "day" field in results)."""
+    days = sorted({r["day"] for r in rows})
+    return [{"starting_at": f"{d}T00:00:00Z", "results": [{k: v for k, v in r.items() if k != "day"}
+                                                          for r in rows if r["day"] == d]} for d in days]
 
 
 class FakeAdmin:
@@ -57,8 +64,8 @@ class FakeAdmin:
         if path == "/usage_report/messages":
             half = len(self.rows) // 2
             if "page" not in params:
-                return {"data": [{"results": self.rows[:half]}], "has_more": True, "next_page": "p2"}
-            return {"data": [{"results": self.rows[half:]}], "has_more": False, "next_page": None}
+                return {"data": buckets(self.rows[:half]), "has_more": True, "next_page": "p2"}
+            return {"data": buckets(self.rows[half:]), "has_more": False, "next_page": None}
         if path.startswith("/api_keys/") and method == "POST":
             key_id = path.rsplit("/", 1)[1]
             self.updates.append((key_id, body["status"]))
