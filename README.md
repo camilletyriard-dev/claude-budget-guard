@@ -22,7 +22,7 @@ Use both: the wrapper is a fast, soft brake inside your code; the watchdog is th
 **1. Install** (needs read access to this repo)
 
 ```bash
-pip install "git+https://github.com/<OWNER>/claude-budget-guard.git"
+pip install "git+https://github.com/camilletyriard-dev/claude-budget-guard.git"
 ```
 
 **2. Set your key and your price** (Broad pays 50% of list price)
